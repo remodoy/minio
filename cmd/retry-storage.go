@@ -97,6 +97,7 @@ func (f *retryStorage) IsOffline() bool {
 		if e := f.reInit(nil); e == nil {
 			// Connection has been re-established
 			f.offline = false // Mark node as back online
+			f.offlineTimestamp = time.Time{} // let if fail if needed
 		}
 	}
 	return f.offline

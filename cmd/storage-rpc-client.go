@@ -128,6 +128,8 @@ func (n *networkStorage) String() string {
 
 // Init - attempts a login to reconnect.
 func (n *networkStorage) Init() error {
+	// always try to connect, remove cooldowns
+	n.rpcClient.FlushLastRetryTime()
 	return toStorageErr(n.rpcClient.Login())
 }
 

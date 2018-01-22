@@ -736,7 +736,7 @@ func (adminAPI adminAPIHandlers) HealFormatHandler(w http.ResponseWriter, r *htt
 
 	// Wrap into retrying disks
 	retryingDisks := initRetryableStorageDisks(bootstrapDisks,
-		time.Millisecond, time.Millisecond*5, globalStorageHealthCheckInterval, globalStorageRetryThreshold)
+		time.Millisecond, time.Millisecond*5, globalStorageHealthCheckInterval, globalStorageRetryThreshold, time.Time{})
 
 	// Heal format.json on available storage.
 	err = healFormatXL(retryingDisks)

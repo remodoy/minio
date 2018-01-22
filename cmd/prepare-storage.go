@@ -340,7 +340,7 @@ func initStorageDisks(endpoints EndpointList) ([]StorageAPI, error) {
 }
 
 // Wrap disks into retryable disks.
-func initRetryableStorageDisks(disks []StorageAPI, retryUnit, retryCap, retryInterval time.Duration, retryThreshold int) (outDisks []StorageAPI) {
+func initRetryableStorageDisks(disks []StorageAPI, retryUnit, retryCap, retryInterval time.Duration, retryThreshold int, offlineTimestamp time.Time) (outDisks []StorageAPI) {
 	// Initialize the disk into a retryable-disks wrapper.
 	outDisks = make([]StorageAPI, len(disks))
 	for i, disk := range disks {
@@ -350,7 +350,7 @@ func initRetryableStorageDisks(disks []StorageAPI, retryUnit, retryCap, retryInt
 			maxRetryAttempts: retryThreshold,
 			retryUnit:        retryUnit,
 			retryCap:         retryCap,
-			offlineTimestamp: UTCNow(), // Set timestamp to prevent immediate marking as offline
+			offlineTimestamp: offlineTimestamp,
 		}
 	}
 	return
@@ -370,7 +370,8 @@ func waitForFormatXLDisks(firstDisk bool, endpoints EndpointList, storageDisks [
 	// that we wait enough amount of time before the disks come
 	// online.
 	retryDisks := initRetryableStorageDisks(storageDisks, time.Second, time.Second*30,
-		globalStorageInitHealthCheckInterval, globalStorageInitRetryThreshold)
+		globalStorageInitHealthCheckInterval, globalStorageInitRetryThreshold, time.Now())
+
 
 	// Start retry loop retrying until disks are formatted
 	// properly, until we have reached a conditional quorum of
@@ -382,7 +383,7 @@ func waitForFormatXLDisks(firstDisk bool, endpoints EndpointList, storageDisks [
 	// Initialize the disk into a formatted disks wrapper. This
 	// uses a shorter retry window (5ms with once-per-ms retries)
 	formattedDisks = initRetryableStorageDisks(storageDisks, time.Millisecond, time.Millisecond*5,
-		globalStorageHealthCheckInterval, globalStorageRetryThreshold)
+		globalStorageHealthCheckInterval, globalStorageRetryThreshold, time.Time{})
 
 	// Success.
 	return formattedDisks, nil

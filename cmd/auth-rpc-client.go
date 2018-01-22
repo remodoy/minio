@@ -33,6 +33,7 @@ import (
 // Attempt to retry only this many number of times before
 // giving up on the remote RPC entirely.
 const globalAuthRPCRetryThreshold = 1
+const defaultDialCooldown = 3 * time.Minute
 
 // authConfig requires to make new AuthRPCClient.
 type authConfig struct {
@@ -60,10 +61,12 @@ type authConfig struct {
 
 // AuthRPCClient is a authenticated RPC client which does authentication before doing Call().
 type AuthRPCClient struct {
-	sync.RWMutex             // Mutex to lock this object.
-	rpcClient    *rpc.Client // RPC Client to make any RPC call.
-	config       authConfig  // Authentication configuration information.
-	authToken    string      // Authentication token.
+	sync.RWMutex                  // Mutex to lock this object.
+	rpcClient         *rpc.Client // RPC Client to make any RPC call.
+	config            authConfig  // Authentication configuration information.
+	authToken         string      // Authentication token.
+	lastAuthRetryTime time.Time   // Last time we did try to authenticate this client
+	conn              net.Conn    // Connection to control request timeouts
 }
 
 // newAuthRPCClient - returns a JWT based authenticated (go) rpc client, which does automatic reconnect.
@@ -83,6 +86,12 @@ func newAuthRPCClient(config authConfig) *AuthRPCClient {
 	return &AuthRPCClient{
 		config: config,
 	}
+}
+
+// clears lasRetryTime,this basically means that we will try again on next call
+// When starting software, this is quite useful
+func (authClient *AuthRPCClient) FlushLastRetryTime() {
+	authClient.lastAuthRetryTime = time.Time{}
 }
 
 // Login a JWT based authentication is performed with rpc server.
@@ -105,7 +114,7 @@ func (authClient *AuthRPCClient) Login() (err error) {
 	defer authClient.Unlock()
 
 	// Attempt to login if not logged in already.
-	if authClient.authToken == "" {
+	if authClient.authToken == "" && authClient.lastAuthRetryTime.Add(defaultDialCooldown).Before(time.Now()) {
 		var authToken string
 		authToken, err = authenticateNode(authClient.config.accessKey, authClient.config.secretKey)
 		if err != nil {
@@ -124,8 +133,18 @@ func (authClient *AuthRPCClient) Login() (err error) {
 
 		// Re-dial after we have disconnected or if its a fresh run.
 		var rpcClient *rpc.Client
-		rpcClient, err = rpcDial(authClient.config.serverAddr, authClient.config.serviceEndpoint, authClient.config.secureConn)
+		var conn net.Conn
+		rpcClient, conn, err = rpcDial(authClient.config.serverAddr, authClient.config.serviceEndpoint, authClient.config.secureConn)
 		if err != nil {
+
+			switch err.(type) {
+			case *net.OpError:
+
+				if err.(*net.OpError).Timeout() {
+					authClient.lastAuthRetryTime = time.Now()
+				}
+			}
+
 			return err
 		}
 
@@ -136,6 +155,7 @@ func (authClient *AuthRPCClient) Login() (err error) {
 		// Initialize rpc client and auth token after a successful login.
 		authClient.authToken = authToken
 		authClient.rpcClient = rpcClient
+		authClient.conn = conn
 	}
 
 	return nil
@@ -154,8 +174,16 @@ func (authClient *AuthRPCClient) call(serviceMethod string, args interface {
 	defer authClient.RUnlock()
 	args.SetAuthToken(authClient.authToken)
 
+	// Set timeout for RPC call
+	authClient.conn.SetDeadline(time.Now().Add(defaultCallTimeout))
+
 	// Do an RPC call.
-	return authClient.rpcClient.Call(serviceMethod, args, reply)
+	err = authClient.rpcClient.Call(serviceMethod, args, reply)
+
+	// Flush timeout, so our readloop does not fail
+	authClient.conn.SetDeadline(time.Time{})
+
+	return
 }
 
 // Call executes RPC call till success or globalAuthRPCRetryThreshold on ErrShutdown.
@@ -211,15 +239,16 @@ func (authClient *AuthRPCClient) ServiceEndpoint() string {
 
 // default Dial timeout for RPC connections.
 const defaultDialTimeout = 3 * time.Second
+const defaultCallTimeout = defaultDialTimeout
 
 // Connect success message required from rpc server.
 const connectSuccessMessage = "200 Connected to Go RPC"
 
 // dial tries to establish a connection to serverAddr in a safe manner.
-// If there is a valid rpc.Cliemt, it returns that else creates a new one.
-func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient *rpc.Client, err error) {
+// If there is a valid rpc.Client, it returns that else creates a new one.
+func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient *rpc.Client, retConn net.Conn, err error) {
 	if serverAddr == "" || serviceEndpoint == "" {
-		return nil, errInvalidArgument
+		return nil, nil, errInvalidArgument
 	}
 	d := &net.Dialer{
 		Timeout: defaultDialTimeout,
@@ -228,7 +257,7 @@ func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient 
 	if secureConn {
 		var hostname string
 		if hostname, _, err = net.SplitHostPort(serverAddr); err != nil {
-			return nil, &net.OpError{
+			return nil, nil, &net.OpError{
 				Op:   "dial-http",
 				Net:  serverAddr + serviceEndpoint,
 				Addr: nil,
@@ -251,7 +280,7 @@ func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient 
 			errorIf(err, "Unable to establish secure connection to %s", serverAddr)
 		}
 
-		return nil, &net.OpError{
+		return nil, nil, &net.OpError{
 			Op:   "dial-http",
 			Net:  serverAddr + serviceEndpoint,
 			Addr: nil,
@@ -262,7 +291,7 @@ func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient 
 	// Check for network errors writing over the dialed conn.
 	if _, err = io.WriteString(conn, "CONNECT "+serviceEndpoint+" HTTP/1.0\n\n"); err != nil {
 		conn.Close()
-		return nil, &net.OpError{
+		return nil, nil, &net.OpError{
 			Op:   "dial-http",
 			Net:  serverAddr + serviceEndpoint,
 			Addr: nil,
@@ -277,7 +306,7 @@ func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient 
 	})
 	if err != nil {
 		conn.Close()
-		return nil, &net.OpError{
+		return nil, nil, &net.OpError{
 			Op:   "dial-http",
 			Net:  serverAddr + serviceEndpoint,
 			Addr: nil,
@@ -286,9 +315,9 @@ func rpcDial(serverAddr, serviceEndpoint string, secureConn bool) (netRPCClient 
 	}
 	if resp.Status != connectSuccessMessage {
 		conn.Close()
-		return nil, errors.New("unexpected HTTP response: " + resp.Status)
+		return nil, nil, errors.New("unexpected HTTP response: " + resp.Status)
 	}
 
 	// Initialize rpc client.
-	return rpc.NewClient(conn), nil
+	return rpc.NewClient(conn), conn, nil
 }
