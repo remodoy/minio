@@ -19,6 +19,8 @@ package cmd
 import (
 	"time"
 
+	"fmt"
+	"github.com/dustin/go-humanize"
 	"github.com/minio/minio/pkg/disk"
 )
 
@@ -97,6 +99,15 @@ func (f *retryStorage) IsOffline() bool {
 		if e := f.reInit(nil); e == nil {
 			// Connection has been re-established
 			f.offline = false // Mark node as back online
+
+			info, _ := f.DiskInfo()
+
+			log.Println(fmt.Sprintf("%s - %s %s", f.String(), humanize.IBytes(uint64(info.Total)), func() string {
+				if info.Total > 0 {
+					return diskOnline
+				}
+				return diskOffline
+			}()))
 		}
 	}
 	return f.offline
@@ -283,6 +294,9 @@ func (f *retryStorage) reInit(e error) (err error) {
 		if e == errDiskNotFoundFromNetError { // Make node offline due to network error
 			f.offline = true // Marking node offline
 			f.offlineTimestamp = UTCNow()
+
+			log.Println(fmt.Sprintf("%s - %s", f.String(), diskOffline))
+
 			return errDiskNotFound
 		}
 		// Continue for other errors like RPC shutdown (and retry connection below)
